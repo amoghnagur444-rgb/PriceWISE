@@ -1,17 +1,16 @@
-<<<<<<< HEAD
 # PriceWISE
-It is a website based on the price tracking of the different e commerce website and give you the best price to buy the product also recommend you through to ai chatbot
+Real-time web app integrating third-party REST APIs to instantly aggregate and compare the price of a product from different e-commerce 
+platforms like Amazon, Flipkart, eBay.  and give you the best price to buy the product also recommend you through to ai chatbot
   # PriceWISE Website Development
 
   This is a code bundle for PriceWISE Website Development.
 
   ## Running the code
-<!-- 
-  Run `npm i` to install the dependencies.
-
-  Run `npm run dev` to start the development server. -->
   
->>>>>>> 83b9d90 (Initial commit)
+  Run 'npm i' to install the dependencies.
+
+  Run 'npm run dev' to start the development server.
+  
 # for backend 
  1. create your environment
   python3 -m venv venv
