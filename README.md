@@ -12,10 +12,10 @@ platforms like Amazon, Flipkart, eBay.  and give you the best price to buy the p
   Run 'npm run dev' to start the development server.
   
 # for backend 
- 1. create your environment
+ 1. create your environment :
   python3 -m venv venv
    
-2. activate enviroment
+3. activate enviroment
     source venv/bin/activate  // for linux
 
     cd backend
@@ -23,6 +23,6 @@ platforms like Amazon, Flipkart, eBay.  and give you the best price to buy the p
     uvicorn main:app --reload --port 8000  
 
 
-#    for frontend 
-   npm i
-   npm run  dev
+#    for frontend
+    1. npm i
+    2. npm run dev
