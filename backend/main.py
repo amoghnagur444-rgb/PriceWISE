@@ -2,6 +2,7 @@ import logging
 import time
 import concurrent.futures
 import re
+import difflib
 from typing import List, Optional
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -26,6 +27,10 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# --- DRIVER SETUP (FIXED RACE CONDITION) ---
+# Download and lock the driver exactly once when the server boots
+GLOBAL_DRIVER_PATH = ChromeDriverManager().install()
+
 # --- DATA MODELS ---
 class ProductResult(BaseModel):
     name: str
@@ -38,6 +43,7 @@ class ProductResult(BaseModel):
     shipping: str
     url: str
     addToCartUrl: str 
+    imageUrl: str # ADDED: Required for frontend rendering
 
 class SearchResponse(BaseModel):
     results: List[ProductResult]
@@ -58,11 +64,24 @@ def is_valid_price(price: float, query: str) -> bool:
 
 def is_valid_title(query: str, title: str) -> bool:
     q_norm = query.lower().split()
-    t_norm = title.lower()
-    keywords = [w for w in q_norm if len(w) > 2] 
+    t_norm = title.lower().split() # Split the title into individual words
+    
+    keywords = [w for w in q_norm if len(w) >= 2] 
     if not keywords: return True 
-    if any(w in t_norm for w in keywords):
+    
+    # 1. Fast Check: Look for exact substring matches first
+    t_full = title.lower()
+    if any(w in t_full for w in keywords):
         return True
+        
+    # 2. Fuzzy Check: Look for 80% similarity for typos
+    for keyword in keywords:
+        # cutoff=0.8 means the word must match by at least 80%
+        fuzzy_matches = difflib.get_close_matches(keyword, t_norm, n=1, cutoff=0.8)
+        if fuzzy_matches:
+            # e.g., "iyphone" matches "iphone" with ~92% similarity
+            return True
+            
     return False
 
 def is_fashion_query(query: str) -> bool:
@@ -76,9 +95,7 @@ def is_fashion_query(query: str) -> bool:
 
 def parse_price(text: str) -> float:
     try:
-        # Remove currency symbols and commas
         clean = re.sub(r'[₹,\s]', '', text)
-        # Extract first number (handles cases like "₹1,299.00" or "1299")
         match = re.search(r'(\d+\.?\d*)', clean)
         if match:
             return float(match.group(1))
@@ -108,21 +125,22 @@ def parse_reviews_from_text(text: str) -> int:
     except: pass
     return 0
 
-# --- DRIVER SETUP ---
+# --- PERFORMANCE TUNED DRIVER ---
 def create_driver():
     options = Options()
-    options.add_argument('--headless')  # ENABLED for faster execution
+    options.page_load_strategy = 'eager'
+    options.add_argument('--headless=new')  
     options.add_argument('--no-sandbox')
     options.add_argument('--disable-dev-shm-usage') 
     options.add_argument('--disable-gpu')
     options.add_argument('--window-size=1920,1080')
     options.add_argument("--log-level=3")
-    options.add_argument("--disable-images")  # Faster loading
-    options.add_argument("--disable-javascript")  # Faster for static content
+    options.add_argument("--disable-images") 
+    options.add_argument("--disable-javascript") 
     options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
     options.add_argument("--disable-blink-features=AutomationControlled")
     
-    service = Service(ChromeDriverManager().install())
+    service = Service(GLOBAL_DRIVER_PATH)
     return webdriver.Chrome(service=service, options=options)
 
 # --- SCRAPERS ---
@@ -136,9 +154,8 @@ def scrape_amazon(query: str) -> List[ProductResult]:
     try:
         driver.get(f"https://www.amazon.in/s?k={query}")
         
-        # Wait for results with timeout
         try:
-            WebDriverWait(driver, 5).until(
+            WebDriverWait(driver, 15).until(
                 EC.presence_of_element_located((By.CSS_SELECTOR, 'div[data-component-type="s-search-result"]'))
             )
         except:
@@ -148,15 +165,13 @@ def scrape_amazon(query: str) -> List[ProductResult]:
         items = driver.find_elements(By.CSS_SELECTOR, 'div[data-component-type="s-search-result"]')
         print(f"[Amazon] Found {len(items)} items")
 
-        for item in items[:10]:  # Reduced from 15
+        for item in items[:10]: 
             try:
                 full_text = item.text.lower()
                 
-                # Skip sponsored and unavailable
                 if "sponsored" in full_text or "unavailable" in full_text or "out of stock" in full_text:
                     continue
 
-                # Name
                 try: 
                     name = item.find_element(By.CSS_SELECTOR, 'h2 a span').text
                 except:
@@ -167,10 +182,8 @@ def scrape_amazon(query: str) -> List[ProductResult]:
 
                 if not is_valid_title(query, name): continue
 
-                # Price - Multiple selectors
                 price = 0.0
                 try:
-                    # Try whole + fraction
                     whole = item.find_element(By.CSS_SELECTOR, 'span.a-price-whole').text
                     try:
                         fraction = item.find_element(By.CSS_SELECTOR, 'span.a-price-fraction').text
@@ -178,7 +191,6 @@ def scrape_amazon(query: str) -> List[ProductResult]:
                     except:
                         price = parse_price(whole)
                 except:
-                    # Fallback: any element with price class
                     try:
                         price_elem = item.find_element(By.CSS_SELECTOR, 'span.a-price span.a-offscreen')
                         price = parse_price(price_elem.get_attribute('textContent'))
@@ -188,7 +200,6 @@ def scrape_amazon(query: str) -> List[ProductResult]:
                 if price < min_price or not is_valid_price(price, query): 
                     continue
 
-                # Rating & Reviews
                 rating = 0.0
                 reviews = 0
                 try:
@@ -201,26 +212,32 @@ def scrape_amazon(query: str) -> List[ProductResult]:
                     reviews = parse_reviews_from_text(review_elem.text)
                 except: pass
 
-                # Link
                 try:
                     link = item.find_element(By.CSS_SELECTOR, 'h2 a').get_attribute('href')
                 except:
                     link = item.find_element(By.TAG_NAME, 'a').get_attribute('href')
+                    
+                # ADDED: Image URL Extraction
+                image_url = ""
+                try:
+                    img_elem = item.find_element(By.CSS_SELECTOR, 'img.s-image')
+                    image_url = img_elem.get_attribute('src')
+                except: pass
                 
                 candidates.append(ProductResult(
                     name=name, 
                     platform="Amazon", 
                     currentPrice=price, 
-                    originalPrice=price*1.2,
+                    originalPrice=price,
                     rating=rating, 
                     reviews=reviews, 
                     inStock=True, 
                     shipping="Free", 
                     url=link,
-                    addToCartUrl=link
+                    addToCartUrl=link,
+                    imageUrl=image_url
                 ))
                 
-                # Early exit if we have a good match
                 if len(candidates) >= 3:
                     break
                     
@@ -246,23 +263,21 @@ def scrape_flipkart(query: str) -> List[ProductResult]:
         driver.get(f"https://www.flipkart.com/search?q={query}")
         
         try:
-            WebDriverWait(driver, 5).until(
+            WebDriverWait(driver, 15).until(
                 EC.presence_of_element_located((By.CSS_SELECTOR, "div[data-id], a[href*='/p/']"))
             )
         except:
             print("[Flipkart] Timeout")
             return []
         
-        # Try multiple selectors
         cards = driver.find_elements(By.CSS_SELECTOR, "div[data-id]")
         if not cards:
             cards = driver.find_elements(By.CSS_SELECTOR, "a[href*='/p/']")
         
-        for card in cards[:8]:  # Reduced from infinite
+        for card in cards[:8]: 
             try:
                 full_text = card.text
                 
-                # Name
                 name = ""
                 try: 
                     name = card.find_element(By.CSS_SELECTOR, "div.KzDlHZ, div._4rR01T").text
@@ -275,14 +290,11 @@ def scrape_flipkart(query: str) -> List[ProductResult]:
                 if not name or not is_valid_title(query, name): 
                     continue
 
-                # Price - improved extraction
                 price = 0.0
                 try:
-                    # Modern Flipkart price selector
                     price_elem = card.find_element(By.CSS_SELECTOR, "div.Nx9bqj, div._30jeq3")
                     price = parse_price(price_elem.text)
                 except:
-                    # Fallback: scan text
                     for line in full_text.split('\n'):
                         if '₹' in line:
                             p = parse_price(line)
@@ -293,7 +305,15 @@ def scrape_flipkart(query: str) -> List[ProductResult]:
                 if not is_valid_price(price, query): 
                     continue
 
-                rating = parse_rating_from_text(full_text)
+                # --- NEW RATING EXTRACTION LOGIC ---
+                rating = 0.0
+                try:
+                    rating_elem = card.find_element(By.CSS_SELECTOR, "div.XQDdHH, div._3LWZlK")
+                    rating = float(rating_elem.text.replace('★', '').strip())
+                except:
+                    rating = parse_rating_from_text(full_text)
+                # -----------------------------------
+
                 reviews = parse_reviews_from_text(full_text)
 
                 try:
@@ -301,17 +321,24 @@ def scrape_flipkart(query: str) -> List[ProductResult]:
                 except:
                     link = card.get_attribute('href') or f"https://www.flipkart.com/search?q={query}"
 
+                image_url = ""
+                try:
+                    img_elem = card.find_element(By.TAG_NAME, 'img')
+                    image_url = img_elem.get_attribute('src')
+                except: pass
+
                 candidates.append(ProductResult(
                     name=name, 
                     platform="Flipkart", 
                     currentPrice=price, 
-                    originalPrice=price*1.1,
+                    originalPrice=price,
                     rating=rating, 
                     reviews=reviews, 
                     inStock=True, 
                     shipping="Free", 
                     url=link,
-                    addToCartUrl=link
+                    addToCartUrl=link,
+                    imageUrl=image_url
                 ))
                 
                 if len(candidates) >= 3:
@@ -338,7 +365,7 @@ def scrape_meesho(query: str) -> List[ProductResult]:
         driver.get(f"https://www.meesho.com/search?q={query}")
         
         try:
-            WebDriverWait(driver, 5).until(
+            WebDriverWait(driver, 15).until(
                 EC.presence_of_element_located((By.CSS_SELECTOR, "a[href*='/p/']"))
             )
         except:
@@ -354,7 +381,6 @@ def scrape_meesho(query: str) -> List[ProductResult]:
                 
                 if not name: continue
                 
-                # Price
                 price = 0.0
                 for line in lines:
                     if '₹' in line:
@@ -367,8 +393,13 @@ def scrape_meesho(query: str) -> List[ProductResult]:
 
                 rating = parse_rating_from_text(full_text)
                 reviews = parse_reviews_from_text(full_text)
-                
                 link = item.get_attribute('href')
+                
+                image_url = ""
+                try:
+                    img_elem = item.find_element(By.TAG_NAME, 'img')
+                    image_url = img_elem.get_attribute('src')
+                except: pass
                 
                 candidates.append(ProductResult(
                     name=name, 
@@ -380,7 +411,8 @@ def scrape_meesho(query: str) -> List[ProductResult]:
                     inStock=True, 
                     shipping="Free", 
                     url=link,
-                    addToCartUrl=link
+                    addToCartUrl=link,
+                    imageUrl=image_url
                 ))
                 
                 if len(candidates) >= 3:
@@ -406,7 +438,7 @@ def scrape_myntra(query: str) -> List[ProductResult]:
         driver.get(f"https://www.myntra.com/{query}")
         
         try:
-            WebDriverWait(driver, 5).until(
+            WebDriverWait(driver, 15).until(
                 EC.presence_of_element_located((By.CSS_SELECTOR, "li.product-base"))
             )
         except:
@@ -418,7 +450,6 @@ def scrape_myntra(query: str) -> List[ProductResult]:
             try:
                 full_text = item.text
                 
-                # Name
                 try:
                     brand = item.find_element(By.CSS_SELECTOR, "h3.product-brand").text
                     product = item.find_element(By.CSS_SELECTOR, "h4.product-product").text
@@ -428,7 +459,6 @@ def scrape_myntra(query: str) -> List[ProductResult]:
                 
                 if not name: continue
                 
-                # Price
                 price = 0.0
                 try:
                     price_txt = item.find_element(By.CSS_SELECTOR, "span.product-discountedPrice").text
@@ -449,6 +479,12 @@ def scrape_myntra(query: str) -> List[ProductResult]:
 
                 link = item.find_element(By.TAG_NAME, 'a').get_attribute('href')
                 
+                image_url = ""
+                try:
+                    img_elem = item.find_element(By.TAG_NAME, 'img')
+                    image_url = img_elem.get_attribute('src')
+                except: pass
+                
                 candidates.append(ProductResult(
                     name=name, 
                     platform="Myntra", 
@@ -459,7 +495,8 @@ def scrape_myntra(query: str) -> List[ProductResult]:
                     inStock=True, 
                     shipping="Paid", 
                     url=link,
-                    addToCartUrl=link
+                    addToCartUrl=link,
+                    imageUrl=image_url
                 ))
                 
                 if len(candidates) >= 3:
@@ -488,11 +525,9 @@ async def search_products(query: str):
     with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
         futures = []
         
-        # Always run Amazon and Flipkart
         futures.append(executor.submit(scrape_amazon, query))
         futures.append(executor.submit(scrape_flipkart, query))
         
-        # Add fashion platforms only for fashion queries
         if is_fashion:
             print("[INFO] Fashion query detected - enabling Myntra & Meesho")
             futures.append(executor.submit(scrape_meesho, query))
@@ -500,7 +535,6 @@ async def search_products(query: str):
         else:
             print("[INFO] Tech/General query - using Amazon & Flipkart only")
         
-        # Collect results
         for future in concurrent.futures.as_completed(futures):
             try:
                 data = future.result()

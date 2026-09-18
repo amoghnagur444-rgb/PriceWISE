@@ -1,7 +1,6 @@
-
-import { useState, useEffect } from 'react';
+import { useState } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
-import { TrendingDown, Star, ExternalLink, ShoppingCart, Bell, Package } from 'lucide-react';
+import { TrendingDown, Star, ExternalLink, Package } from 'lucide-react';
 
 interface Product {
   name: string;
@@ -17,42 +16,12 @@ interface Product {
 
 interface ProductComparisonProps {
   searchQuery: string;
-  onAddToCart: (product: Product) => void;
-  onTrackProduct: (product: Product) => void;
-  isAuthenticated: boolean;
+  products: Product[];
+  loading: boolean;
 }
 
-export function ProductComparison({ searchQuery, onAddToCart, onTrackProduct, isAuthenticated }: ProductComparisonProps) {
-  const [products, setProducts] = useState<Product[]>([]);
-  const [loading, setLoading] = useState(false);
+export function ProductComparison({ searchQuery, products, loading }: ProductComparisonProps) {
   const [sortBy, setSortBy] = useState<'price' | 'rating'>('price');
-
-  useEffect(() => {
-    if (searchQuery) {
-      fetchProducts();
-    }
-  }, [searchQuery]);
-
-  const fetchProducts = async () => {
-    setLoading(true);
-    try {
-      // Updated to point to the local Python FastAPI backend
-      const response = await fetch(
-        `http://127.0.0.1:8000/search/${encodeURIComponent(searchQuery)}`
-      );
-
-      // Check if the response is valid
-      if (!response.ok) throw new Error('Backend failed');
-
-      const data = await response.json();
-      setProducts(data.results || []);
-    } catch (error) {
-      console.error('Error fetching products:', error);
-      // Optional: Add UI error handling here
-    } finally {
-      setLoading(false);
-    }
-  };
 
   const sortedProducts = [...products].sort((a, b) => {
     if (sortBy === 'price') {
@@ -61,7 +30,7 @@ export function ProductComparison({ searchQuery, onAddToCart, onTrackProduct, is
     return b.rating - a.rating;
   });
 
-  const cheapestPrice = Math.min(...products.map(p => p.currentPrice));
+  const cheapestPrice = products.length > 0 ? Math.min(...products.map(p => p.currentPrice)) : 0;
 
   if (!searchQuery) {
     return null;
@@ -191,35 +160,11 @@ export function ProductComparison({ searchQuery, onAddToCart, onTrackProduct, is
                         whileHover={{ scale: 1.05 }}
                         whileTap={{ scale: 0.95 }}
                         onClick={() => window.open(product.url, '_blank')}
-                        className="flex-1 bg-gradient-to-r from-emerald-500 to-cyan-500 hover:from-emerald-600 hover:to-cyan-600 text-white py-2 rounded-lg flex items-center justify-center gap-2 transition-all"
+                        className="w-full bg-gradient-to-r from-emerald-500 to-cyan-500 hover:from-emerald-600 hover:to-cyan-600 text-white py-2 rounded-lg flex items-center justify-center gap-2 transition-all"
                       >
                         <ExternalLink className="w-4 h-4" />
-                        View
+                        View on {product.platform}
                       </motion.button>
-
-                      {isAuthenticated && (
-                        <>
-                          <motion.button
-                            whileHover={{ scale: 1.05 }}
-                            whileTap={{ scale: 0.95 }}
-                            onClick={() => onAddToCart(product)}
-                            className="p-2 bg-gray-100 hover:bg-gray-200 text-gray-700 rounded-lg transition-colors border border-gray-300"
-                            title="Add to Cart"
-                          >
-                            <ShoppingCart className="w-5 h-5" />
-                          </motion.button>
-
-                          <motion.button
-                            whileHover={{ scale: 1.05 }}
-                            whileTap={{ scale: 0.95 }}
-                            onClick={() => onTrackProduct(product)}
-                            className="p-2 bg-gray-100 hover:bg-gray-200 text-gray-700 rounded-lg transition-colors border border-gray-300"
-                            title="Track Price"
-                          >
-                            <Bell className="w-5 h-5" />
-                          </motion.button>
-                        </>
-                      )}
                     </div>
                   </motion.div>
                 );
